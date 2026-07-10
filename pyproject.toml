@@ -51,3 +51,6 @@ dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.0",
 ]
+gpu = [
+    "vllm>=0.24.0",
+]
