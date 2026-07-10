@@ -81,19 +81,17 @@ def wait_for_vllm(base_url: str, timeout: int = 600) -> bool:
 def plan_gpus(*, embedding_memory_gb: float = 4.0, llm_memory_gb: float = 24.0, max_llm_gpus: int = 2) -> tuple[int, list[int]]:
     """Select one embedding GPU and up to two LLM GPUs.
 
-    LLM GPUs are chosen from the same PIX (PCIe bridge) pair when possible,
-    avoiding cross-NUMA NCCL communication failures. If only one GPU is free,
-    it is shared by both services.
+    LLM GPUs are chosen FIRST from the best PIX (PCIe bridge) pair to ensure
+    NCCL-compatible tensor parallelism.  The embedding GPU is then picked from
+    the remaining GPUs.  If only one GPU is free it is shared by both services.
     """
-    gpus = [gpu for gpu in get_gpus() if gpu.free_memory_gb >= embedding_memory_gb]
+    all_gpus = {gpu.index: gpu for gpu in get_gpus()}
+    gpus = [gpu for gpu in all_gpus.values() if gpu.free_memory_gb >= embedding_memory_gb]
     if not gpus:
         raise GPUUnavailableError(f"No GPU has at least {embedding_memory_gb:.1f} GB free for embeddings")
-    embedding_gpu = max(gpus, key=lambda gpu: gpu.free_memory_gb)
 
-    # Build PIX-adjacent pairs from nvidia-smi topology
-    pairs: dict[int, list[int]] = {}
-    for g in gpus:
-        pairs[g.index] = [g.index]  # every GPU is at least adjacent to itself
+    # --- discover PIX / NVLink pairs from topology --------------------------------
+    pairs: dict[int, set[int]] = {gpu.index: {gpu.index} for gpu in gpus}
     try:
         result = subprocess.run(
             ["nvidia-smi", "topo", "-m"],
@@ -105,27 +103,52 @@ def plan_gpus(*, embedding_memory_gb: float = 4.0, llm_memory_gb: float = 24.0, 
             parts = line.split()
             src = int(parts[0].lstrip("GPU"))
             for dst, label in enumerate(parts[1:], start=0):
-                if label in ("PIX", "NV"):
-                    pairs.setdefault(src, []).append(dst)
+                if label in ("PIX", "NV") and src in all_gpus and dst in all_gpus:
+                    pairs.setdefault(src, set()).add(dst)
     except (FileNotFoundError, subprocess.CalledProcessError):
-        pass  # fall back to free-memory ordering
+        pass
 
-    def _best_pair(for_gpus: list, count: int) -> list[int]:
-        """Pick the *count* GPUs with the most free memory that share a PIX/NV link."""
-        if len(for_gpus) < count:
-            return [g.index for g in sorted(for_gpus, key=lambda g: g.free_memory_gb, reverse=True)]
-        best = None
-        best_mem = -1.0
-        for g in for_gpus:
-            family = {idx for idx in pairs.get(g.index, [g.index])}
-            candidates = [c for c in for_gpus if c.index in family]
-            if len(candidates) >= count:
-                total = sum(c.free_memory_gb for c in sorted(candidates, key=lambda x: x.free_memory_gb, reverse=True)[:count])
-                if total > best_mem:
-                    best_mem = total
-                    best = [c.index for c in sorted(candidates, key=lambda x: x.free_memory_gb, reverse=True)[:count]]
-        return best or [g.index for g in sorted(for_gpus, key=lambda g: g.free_memory_gb, reverse=True)[:count]]
+    # --- helper: total free MB of the best *count* GPUs in a family ---------------
+    def _family_best(gpu_list: list, count: int) -> tuple[float, list[int]]:
+        top = sorted(gpu_list, key=lambda g: g.free_memory_gb, reverse=True)[:count]
+        return (sum(g.free_memory_gb for g in top), [g.index for g in top])
 
-    llm_candidates = [g for g in gpus if g.index != embedding_gpu.index and g.free_memory_gb >= llm_memory_gb]
-    llm_gpus = _best_pair(llm_candidates, min(max_llm_gpus, 2)) if llm_candidates else [embedding_gpu.index]
+    # --- pick best LLM pair -------------------------------------------------------
+    gpu_by_index = {gpu.index: gpu for gpu in gpus}
+    best_llm: list[int] | None = None
+    best_llm_mem = -1.0
+    seen_families: set[frozenset[int]] = set()
+
+    for gpu in gpus:
+        family_ids = frozenset(pairs.get(gpu.index, {gpu.index}))
+        if family_ids in seen_families:
+            continue
+        seen_families.add(family_ids)
+        family_gpus = [gpu_by_index[i] for i in family_ids if i in gpu_by_index]
+        # filter to GPUs with enough free memory for LLM
+        eligible = [g for g in family_gpus if g.free_memory_gb >= llm_memory_gb]
+        if len(eligible) >= 2:
+            mem, idxs = _family_best(eligible, min(max_llm_gpus, 2))
+            if len(idxs) >= 2 and mem > best_llm_mem:
+                best_llm_mem = mem
+                best_llm = idxs
+
+    if best_llm is not None:
+        llm_gpus = best_llm
+        # embedding GPU: best free memory among GPUs NOT in the LLM set
+        remaining = [g for g in gpus if g.index not in set(llm_gpus)]
+        embedding_gpu = max(remaining, key=lambda g: g.free_memory_gb) if remaining else \
+                        max(gpus, key=lambda g: g.free_memory_gb)
+    else:
+        # no full pair available — fall back to single LLM GPU (shared or dedicated)
+        llm_candidates = sorted(
+            [g for g in gpus if g.free_memory_gb >= llm_memory_gb],
+            key=lambda g: g.free_memory_gb, reverse=True,
+        )
+        embedding_gpu = max(gpus, key=lambda g: g.free_memory_gb)
+        if llm_candidates and llm_candidates[0].index != embedding_gpu.index:
+            llm_gpus = [llm_candidates[0].index]
+        else:
+            llm_gpus = [embedding_gpu.index]  # share the embedding GPU
+
     return embedding_gpu.index, llm_gpus
