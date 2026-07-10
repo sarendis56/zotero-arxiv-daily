@@ -24,7 +24,7 @@ llm:
 source:
   arxiv:
     category: [cs.AI, cs.CR, cs.CV, cs.IR, cs.OH, cs.OS, cs.CL]
-    include_cross_list: true
+    include_cross_list: false
 
 reranker:
   local:

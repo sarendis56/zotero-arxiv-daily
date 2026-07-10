@@ -135,6 +135,8 @@ class ArxivRetriever(BaseRetriever):
         bar = tqdm(total=len(all_paper_ids))
         max_batch_retries = 5
         batch_retry_delay = 30
+        # Stagger first request to avoid hitting arXiv rate limit cold
+        sleep(3)
         for i in range(0, len(all_paper_ids), 20):
             search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
             for attempt in range(max_batch_retries):
