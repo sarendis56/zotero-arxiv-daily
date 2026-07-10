@@ -81,14 +81,51 @@ def wait_for_vllm(base_url: str, timeout: int = 600) -> bool:
 def plan_gpus(*, embedding_memory_gb: float = 4.0, llm_memory_gb: float = 24.0, max_llm_gpus: int = 2) -> tuple[int, list[int]]:
     """Select one embedding GPU and up to two LLM GPUs.
 
-    If only one GPU is free, it is shared by both services; the vLLM launcher
-    uses conservative memory utilization in that mode.
+    LLM GPUs are chosen from the same PIX (PCIe bridge) pair when possible,
+    avoiding cross-NUMA NCCL communication failures. If only one GPU is free,
+    it is shared by both services.
     """
     gpus = [gpu for gpu in get_gpus() if gpu.free_memory_gb >= embedding_memory_gb]
     if not gpus:
         raise GPUUnavailableError(f"No GPU has at least {embedding_memory_gb:.1f} GB free for embeddings")
     embedding_gpu = max(gpus, key=lambda gpu: gpu.free_memory_gb)
-    llm_candidates = [gpu for gpu in gpus if gpu.index != embedding_gpu.index and gpu.free_memory_gb >= llm_memory_gb]
-    llm_candidates.sort(key=lambda gpu: gpu.free_memory_gb, reverse=True)
-    llm_gpus = [gpu.index for gpu in llm_candidates[:max_llm_gpus]] or [embedding_gpu.index]
+
+    # Build PIX-adjacent pairs from nvidia-smi topology
+    pairs: dict[int, list[int]] = {}
+    for g in gpus:
+        pairs[g.index] = [g.index]  # every GPU is at least adjacent to itself
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            check=True, capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            if not line.startswith("GPU"):
+                continue
+            parts = line.split()
+            src = int(parts[0].lstrip("GPU"))
+            for dst, label in enumerate(parts[1:], start=0):
+                if label in ("PIX", "NV"):
+                    pairs.setdefault(src, []).append(dst)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass  # fall back to free-memory ordering
+
+    def _best_pair(for_gpus: list, count: int) -> list[int]:
+        """Pick the *count* GPUs with the most free memory that share a PIX/NV link."""
+        if len(for_gpus) < count:
+            return [g.index for g in sorted(for_gpus, key=lambda g: g.free_memory_gb, reverse=True)]
+        best = None
+        best_mem = -1.0
+        for g in for_gpus:
+            family = {idx for idx in pairs.get(g.index, [g.index])}
+            candidates = [c for c in for_gpus if c.index in family]
+            if len(candidates) >= count:
+                total = sum(c.free_memory_gb for c in sorted(candidates, key=lambda x: x.free_memory_gb, reverse=True)[:count])
+                if total > best_mem:
+                    best_mem = total
+                    best = [c.index for c in sorted(candidates, key=lambda x: x.free_memory_gb, reverse=True)[:count]]
+        return best or [g.index for g in sorted(for_gpus, key=lambda g: g.free_memory_gb, reverse=True)[:count]]
+
+    llm_candidates = [g for g in gpus if g.index != embedding_gpu.index and g.free_memory_gb >= llm_memory_gb]
+    llm_gpus = _best_pair(llm_candidates, min(max_llm_gpus, 2)) if llm_candidates else [embedding_gpu.index]
     return embedding_gpu.index, llm_gpus
