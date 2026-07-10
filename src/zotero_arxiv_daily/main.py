@@ -32,20 +32,18 @@ def main(config:DictConfig):
     
     if config.get("runtime", {}).get("gpu") is not None:
         try:
-            embedding_gpu, llm_gpus = plan_gpus(
+            embedding_gpu, _ = plan_gpus(
                 embedding_memory_gb=config.runtime.gpu.embedding_memory_gb,
                 llm_memory_gb=config.runtime.gpu.llm_memory_gb,
                 max_llm_gpus=config.runtime.gpu.max_llm_gpus,
             )
             os.environ["EMBEDDING_DEVICE"] = f"cuda:{embedding_gpu}"
-            logger.info(f"GPU preflight passed: embedding GPU {embedding_gpu}; LLM GPUs {llm_gpus}")
+            logger.info(f"GPU preflight passed: embedding GPU {embedding_gpu}")
         except GPUUnavailableError as exc:
             logger.error(str(exc))
             send_gpu_unavailable_notification(config, str(exc))
             return
-        executor = Executor(config, llm_gpus=llm_gpus)
-    else:
-        executor = Executor(config)
+    executor = Executor(config)
     executor.run()
 
 if __name__ == '__main__':
