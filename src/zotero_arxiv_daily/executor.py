@@ -31,7 +31,7 @@ def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key:
 
 
 class Executor:
-    def __init__(self, config:DictConfig, llm_gpus: list[int] | None = None):
+    def __init__(self, config:DictConfig):
         self.config = config
         self.include_path_patterns = normalize_path_patterns(config.zotero.include_path, "include_path")
         self.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, "ignore_path")
@@ -39,7 +39,6 @@ class Executor:
             source: get_retriever_cls(source)(config) for source in config.executor.source
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self._llm_gpus = llm_gpus
         self._vllm_process: subprocess.Popen | None = None
         self._openai_client: OpenAI | None = None
 
@@ -53,24 +52,40 @@ class Executor:
         return self._openai_client
 
     def _ensure_vllm_ready(self) -> None:
-        """Start vLLM server lazily when running with local GPUs."""
-        if self._llm_gpus is None:
-            return  # not a local GPU run — assume LLM endpoint is already available
-        from .gpu import start_vllm, wait_for_vllm
+        """Start vLLM lazily, checking GPU availability at the last moment."""
+        if self._openai_client is not None:
+            return  # already running
+
+        gpu_cfg = self.config.get("runtime", {}).get("gpu")
+        if gpu_cfg is None:
+            # Not a local GPU run — assume LLM endpoint is already available
+            return
+
+        from .gpu import GPUUnavailableError, plan_gpus, start_vllm, wait_for_vllm
+
+        try:
+            _, llm_gpus = plan_gpus(
+                embedding_memory_gb=gpu_cfg.embedding_memory_gb,
+                llm_memory_gb=gpu_cfg.llm_memory_gb,
+                max_llm_gpus=gpu_cfg.max_llm_gpus,
+            )
+        except GPUUnavailableError as exc:
+            logger.error(f"No GPU available for LLM inference: {exc}")
+            logger.info("Papers are cached — retry later when GPUs are free.")
+            raise
 
         base_url = self.config.llm.api.base_url.rstrip("/")
-        # Extract port from base_url like http://127.0.0.1:8000/v1
         port_str = base_url.rstrip("/").rsplit(":", 1)[-1].replace("/v1", "")
         port = int(port_str)
         model = self.config.llm.generation_kwargs.model
-        tp_size = len(self._llm_gpus)
+        tp_size = len(llm_gpus)
         gpu_mem_util = 0.60 if tp_size == 1 else 0.88
 
-        logger.info(f"Starting vLLM ({model}) on GPUs {self._llm_gpus} "
+        logger.info(f"Starting vLLM ({model}) on GPUs {llm_gpus} "
                     f"(tp={tp_size}, mem_util={gpu_mem_util})…")
         self._vllm_process = start_vllm(
             model=model, port=port,
-            llm_gpus=self._llm_gpus,
+            llm_gpus=llm_gpus,
             gpu_memory_utilization=gpu_mem_util,
         )
         if not wait_for_vllm(base_url):
@@ -140,27 +155,43 @@ class Executor:
 
     
     def run(self):
+        from .cache import load_papers, save_papers
+
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
         if len(corpus) == 0:
             logger.error(f"No zotero papers found. Please check your zotero settings:\n{self.config.zotero}")
             return
-        all_papers = []
-        for source, retriever in self.retrievers.items():
-            logger.info(f"Retrieving {source} papers...")
-            papers = retriever.retrieve_papers()
-            if len(papers) == 0:
-                logger.info(f"No {source} papers found")
-                continue
-            logger.info(f"Retrieved {len(papers)} {source} papers")
-            all_papers.extend(papers)
-        logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
+
+        today = datetime.now().date()
+        use_cache = self.config.get("runtime", {}).get("gpu") is not None
+        all_papers = load_papers(today) if use_cache else None
+        if all_papers is not None:
+            logger.info(f"Skipping retrieval — using {len(all_papers)} cached papers from {today}")
+        else:
+            all_papers = []
+            for source, retriever in self.retrievers.items():
+                logger.info(f"Retrieving {source} papers...")
+                papers = retriever.retrieve_papers()
+                if len(papers) == 0:
+                    logger.info(f"No {source} papers found")
+                    continue
+                logger.info(f"Retrieved {len(papers)} {source} papers")
+                all_papers.extend(papers)
+            logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
+            if all_papers and use_cache:
+                save_papers(all_papers, today)
+
         reranked_papers = []
         if len(all_papers) > 0:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
-            self._ensure_vllm_ready()
+            try:
+                self._ensure_vllm_ready()
+            except Exception:
+                logger.info("Papers are cached — rerun later when GPUs are free.")
+                return
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
