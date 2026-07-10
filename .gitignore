@@ -17,5 +17,6 @@ models
 test-compose.yml
 outputs
 output/cache/
+output/vllm.log
 config/private.yaml
 run_output.log
