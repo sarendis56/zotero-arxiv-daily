@@ -30,4 +30,9 @@ class LocalReranker(BaseReranker):
         s1_feature = encoder.encode(s1,**encode_kwargs,show_progress_bar=True)
         s2_feature = encoder.encode(s2,**encode_kwargs,show_progress_bar=True)
         sim = encoder.similarity(s1_feature, s2_feature)
-        return sim.numpy()
+        result = sim.numpy()
+        # Free GPU memory held by the encoder before vLLM starts
+        del encoder, s1_feature, s2_feature, sim
+        import torch
+        torch.cuda.empty_cache()
+        return result

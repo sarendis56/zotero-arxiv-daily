@@ -81,6 +81,10 @@ class Executor:
         tp_size = len(llm_gpus)
         gpu_mem_util = 0.60 if tp_size == 1 else 0.88
 
+        # Free residual GPU memory before starting vLLM
+        import torch
+        torch.cuda.empty_cache()
+
         logger.info(f"Starting vLLM ({model}) on GPUs {llm_gpus} "
                     f"(tp={tp_size}, mem_util={gpu_mem_util})…")
         self._vllm_process = start_vllm(
