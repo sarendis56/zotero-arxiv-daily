@@ -189,8 +189,11 @@ class Executor:
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
             try:
                 self._ensure_vllm_ready()
-            except Exception:
+            except Exception as exc:
+                logger.error(f"vLLM startup failed: {exc}")
                 logger.info("Papers are cached — rerun later when GPUs are free.")
+                if self._vllm_process is not None:
+                    self._shutdown_vllm()
                 return
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):

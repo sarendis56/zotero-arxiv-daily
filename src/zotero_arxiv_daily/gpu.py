@@ -47,6 +47,9 @@ def start_vllm(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in llm_gpus)
     tp_size = len(llm_gpus)
+    log_path = Path("output") / "vllm.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(str(log_path), "w")
     return subprocess.Popen(
         [
             vllm_bin, "serve", model,
@@ -56,12 +59,12 @@ def start_vllm(
             "--port", str(port),
         ],
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
     )
 
 
-def wait_for_vllm(base_url: str, timeout: int = 300) -> bool:
+def wait_for_vllm(base_url: str, timeout: int = 600) -> bool:
     """Block until the vLLM server at *base_url* responds to /models."""
     import requests as _requests
     deadline = time.time() + timeout
