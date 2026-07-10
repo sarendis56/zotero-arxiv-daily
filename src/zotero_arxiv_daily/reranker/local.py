@@ -22,7 +22,9 @@ class LocalReranker(BaseReranker):
         device = self.config.reranker.local.get("device") or None
         encoder = SentenceTransformer(self.config.reranker.local.model, trust_remote_code=True, device=device)
         if self.config.reranker.local.encode_kwargs:
-            encode_kwargs = self.config.reranker.local.encode_kwargs
+            encode_kwargs = dict(self.config.reranker.local.encode_kwargs)
+            if "batch_size" in encode_kwargs:
+                encode_kwargs["batch_size"] = int(encode_kwargs["batch_size"])
         else:
             encode_kwargs = {}
         s1_feature = encoder.encode(s1,**encode_kwargs,show_progress_bar=True)
