@@ -31,6 +31,9 @@
 
 *Zotero-arXiv-Daily* finds arxiv papers that may attract you based on the context of your Zotero library, and then sends the result to your mailbox📮. It can be deployed as Github Action Workflow with **zero cost**, **no installation**, and **few configuration** of Github Action environment variables for daily **automatic** delivery.
 
+> [!TIP]
+> **Run fully locally with your own GPUs — zero API cost.** Use vLLM + sentence-transformers to run the entire pipeline on your machine instead of paying for cloud APIs. See [LOCAL_GPU.md](LOCAL_GPU.md) for setup. Quick start: `./scripts/setup_gpu_env.sh && cp .env.example .env` (fill in your values), then `./scripts/run_local_gpu.sh`.
+
 ## ✨ Features
 - Totally free! All the calculation can be done in the Github Action runner locally within its quota (for public repo).
 - AI-generated TL;DR for you to quickly pick up target papers.
