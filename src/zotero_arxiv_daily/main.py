@@ -6,6 +6,8 @@ import hydra
 from loguru import logger
 import dotenv
 from zotero_arxiv_daily.executor import Executor
+from zotero_arxiv_daily.gpu import GPUUnavailableError, plan_gpus
+from zotero_arxiv_daily.notifications import send_gpu_unavailable_notification
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 dotenv.load_dotenv()
 
@@ -28,6 +30,18 @@ def main(config:DictConfig):
     if config.executor.debug:
         logger.info("Debug mode is enabled")
     
+    if config.get("runtime", {}).get("gpu") is not None:
+        try:
+            embedding_gpu, llm_gpus = plan_gpus(
+                embedding_memory_gb=config.runtime.gpu.embedding_memory_gb,
+                llm_memory_gb=config.runtime.gpu.llm_memory_gb,
+                max_llm_gpus=config.runtime.gpu.max_llm_gpus,
+            )
+            logger.info(f"GPU preflight passed: embedding GPU {embedding_gpu}; LLM GPUs {llm_gpus}")
+        except GPUUnavailableError as exc:
+            logger.error(str(exc))
+            send_gpu_unavailable_notification(config, str(exc))
+            return
     executor = Executor(config)
     executor.run()
 

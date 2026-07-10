@@ -1,0 +1,50 @@
+defaults:
+  - base
+  - _self_
+
+zotero:
+  user_id: ${oc.env:ZOTERO_ID}
+  api_key: ${oc.env:ZOTERO_KEY}
+
+email:
+  sender: ${oc.env:SENDER}
+  receiver: ${oc.env:RECEIVER}
+  smtp_server: ${oc.env:SMTP_SERVER,smtp.qq.com}
+  smtp_port: ${oc.env:SMTP_PORT,465}
+  sender_password: ${oc.env:SENDER_PASSWORD}
+
+llm:
+  api:
+    key: ${oc.env:LOCAL_LLM_API_KEY,EMPTY}
+    base_url: ${oc.env:LOCAL_LLM_BASE_URL,http://127.0.0.1:8000/v1}
+  generation_kwargs:
+    model: ${oc.env:LOCAL_LLM_MODEL,Qwen/Qwen3-32B}
+    max_tokens: 512
+
+source:
+  arxiv:
+    category: [cs.AI, cs.CR, cs.CV, cs.IR, cs.OH, cs.OS, cs.CL]
+    include_cross_list: true
+
+reranker:
+  local:
+    model: ${oc.env:EMBEDDING_MODEL,BAAI/bge-m3}
+    device: ${oc.env:EMBEDDING_DEVICE,cuda}
+    encode_kwargs:
+      batch_size: ${oc.env:EMBEDDING_BATCH_SIZE,512}
+      normalize_embeddings: true
+
+executor:
+  source: [arxiv]
+  reranker: local
+  max_paper_num: 100
+  recent_interest_days: 30
+  recent_interest_weight: 0.70
+  max_similarity_weight: 0.10
+
+runtime:
+  gpu:
+    embedding_memory_gb: 4
+    llm_memory_gb: 24
+    max_llm_gpus: 2
+    notification_subject: "Zotero arXiv Daily paused: GPU unavailable"
