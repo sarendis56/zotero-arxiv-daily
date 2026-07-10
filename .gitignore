@@ -17,3 +17,4 @@ models
 test-compose.yml
 outputs
 config/private.yamlrun_output.log
+run_output.log
